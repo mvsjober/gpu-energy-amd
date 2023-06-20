@@ -76,7 +76,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (doDiff) {
-      double energyWh = energy*(double)counterResolution/3600000.0;
+      double energyWh = energy*(double)counterResolution/3600000000.0;
       cout << "GPU " << i << ": " << energyWh << " Wh" << endl;
     } else  {
       output << energy << " ";

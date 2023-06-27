@@ -1,15 +1,62 @@
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <vector>
+
 #include "rocm_smi/rocm_smi.h"
 
 #define EPSILON 0.0001f
 
 using namespace std;
 
+struct energy_counter_t {
+    uint64_t energy;
+    float resolution;
+    uint64_t timestamp;
+};
+
+map<unsigned int, energy_counter_t> previousValues;
+
+
+// Generate "unique" temp filename based on Slurm variables
+string generateFilename() {
+  string fn = "gpu-energy";
+
+  if (const char* job_id = getenv("SLURM_JOB_ID"))
+    fn += string("-") + job_id;
+
+  if (const char* proc_id = getenv("SLURM_PROCID"))
+    fn += string("-") + proc_id;
+    
+  return filesystem::path(filesystem::temp_directory_path() / fn);
+}
+
+
 int main(int argc, char* argv[]) {
-  bool doDiff = false;
+  bool save = false;   // if we should save the result to file
+  bool diff = false;  // if we should print energy difference
+
+  
+  // Handle command line arguments
+  string mode = argc > 1 ? argv[1] : "";
+  string filename = argc > 2 ? argv[2] : "";
+
+  if (argc <= 3 && (mode == "--save" || mode == "-s"))
+    save = true;
+  else if (argc <= 3 && (mode == "--diff" || mode == "-p"))
+    diff = true;
+  else if (!mode.empty()) {
+    cerr << "Usage: " << argv[0] << endl;
+    cerr << "       " << argv[0] << " --save [filename]" << endl;
+    cerr << "       " << argv[0] << " --diff [filename]" << endl;
+    return -1;
+  }
+    
+
+  // Initialize RSMI library
   rsmi_status_t ret;
   uint32_t numDevices = 0;
 
@@ -25,66 +72,101 @@ int main(int argc, char* argv[]) {
     return -1;
   }
 
-  vector<uint64_t> prevValues(numDevices, -1);
-  float prevResolution = -1.0;
 
-  if (argc == (int)numDevices + 2) {
-    doDiff = true;
-    prevResolution = atof(argv[1]);
-  
-    for (int i=2; i<argc; ++i) {
-      prevValues[i-2] = atol(argv[i]);
-    }
-  } else if (argc != 1) {
-    cerr << "Usage: " << argv[0] << endl;
-    cerr << "       " << argv[0] << " <counterResolution> <energy1> ... <energy"
-         << numDevices << ">" << endl;
-    return -1;
+  // Resolve filename if needed
+  if ((save || diff) && filename.empty()) {
+    filename = generateFilename();
   }
   
-  float counterResolution = prevResolution;
-  ostringstream output;
+  
+  // Read previous values if needed
+  if (diff) {
+    ifstream fp(filename);
 
-  for (unsigned int i=0; i<numDevices; ++i) {
-    uint64_t energy;
-    float res;
-    uint64_t timestamp;
-    ret = rsmi_dev_energy_count_get(i, &energy, &res, &timestamp);
-    if (counterResolution < 0.0) {
-      counterResolution = res;
-      output << counterResolution << " ";
-    } else if (fabs(res - counterResolution) > EPSILON) {
-      cerr << "ERROR: counter resolution is not constant: " << res << " != "
-           << counterResolution << endl;
+    if (!fp) {
+      cerr << "ERROR: unable to read from file " << filename << endl;
       return -1;
     }
-    counterResolution = res;
+    
+    unsigned int i;
+    while (fp)  {
+      energy_counter_t cnt;
+      fp >> i >> cnt.energy >> cnt.resolution >> cnt.timestamp;
+      previousValues[i] = cnt;
+    }
+    
+    if (i+1 != numDevices) {
+      cerr << "ERROR: number of devices read from " << filename
+           << " does not match: " << i+1 << " != " << numDevices << endl;
+      return -1;
+    }
+  }
+
+  
+  // Open file for writing
+  ofstream fp;
+  if (save) {
+    if (filesystem::exists(filename)) {
+      cerr << "WARNING: temporary file " << filename << " already exists!"
+           << endl;
+    }
+    fp.open(filename);
+    if (!fp) {
+      cerr << "ERROR: unable to write to file " << filename << endl;
+      return -1;
+    }
+  }    
+
+
+  // Loop over all visible GPU devices and print/save energy counter
+  for (unsigned int i=0; i<numDevices; ++i) {
+    // uint64_t energy;
+    // float res;
+    // uint64_t timestamp;
+    energy_counter_t cnt;
+    ret = rsmi_dev_energy_count_get(i, &cnt.energy, &cnt.resolution,
+                                    &cnt.timestamp);
     
     if (ret != RSMI_STATUS_SUCCESS) {
-      cerr << "ERROR: unable to get GPU energy counter from ROCm library" << endl;
+      cerr << "ERROR: unable to get GPU energy counter from ROCm library"
+           << endl;
       return -1;
     }
 
-    if (doDiff) {
-      uint64_t prevEnergy = prevValues[i];
-      if (prevEnergy < 0.0) {
-        cerr << "Previous value for GPU " << i << " incorrect " << prevEnergy
-             << endl;
+    if (save) {
+      fp << i << " " << cnt.energy << " " << cnt.resolution << " "
+         << cnt.timestamp << endl;
+    }
+
+    uint64_t energy = cnt.energy;
+
+    // Check previous value if we're printing the difference
+    if (diff) {
+      auto prev = previousValues.at(i);
+      if (fabs(cnt.resolution - prev.resolution) > EPSILON) {
+        cerr << "ERROR: counter resolutions are different: " << cnt.resolution
+             << " != " << prev.resolution << endl;
         return -1;
       }
-      energy = energy - prevEnergy;
+      if (prev.energy > energy) {
+        cerr << "ERROR: previous energy counter larger than current value: "
+             << prev.energy << " > " << energy << endl;
+        return -1;
+      }
+      energy -= prev.energy;
     }
 
-    if (doDiff) {
-      double energyWh = energy*(double)counterResolution/3600000000.0;
+    if (diff || !save) {
+      double energyWh = (double)energy*cnt.resolution/3600000000.0;
       cout << "GPU " << i << ": " << energyWh << " Wh" << endl;
-    } else  {
-      output << energy << " ";
-    }
+    }      
   }
-  if (!doDiff)
-    cout << output.str() << endl;
 
+  if (save)
+    fp.close();
+  if (diff)
+    filesystem::remove(filename);
+    
   ret = rsmi_shut_down();
 
   return 0;

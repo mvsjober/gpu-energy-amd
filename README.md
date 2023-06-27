@@ -42,9 +42,9 @@ gpu-energy --diff
 Multi node job:
 
 ```bash
-srun gpu-energy --save
+srun --ntasks=$SLURM_NNODES --ntasks-per-node=1 gpu-energy --save
 
 # run job here
 
-srun gpu-energy --diff
+srun --ntasks=$SLURM_NNODES --ntasks-per-node=1 gpu-energy --diff
 ```

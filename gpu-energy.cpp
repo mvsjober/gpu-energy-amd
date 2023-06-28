@@ -80,6 +80,7 @@ int main(int argc, char* argv[]) {
   
   
   // Read previous values if needed
+  uint64_t earliestTimeStamp = 0;
   if (diff) {
     ifstream fp(filename);
 
@@ -93,6 +94,8 @@ int main(int argc, char* argv[]) {
       energy_counter_t cnt;
       fp >> i >> cnt.energy >> cnt.resolution >> cnt.timestamp;
       previousValues[i] = cnt;
+      if (earliestTimeStamp == 0 || cnt.timestamp < earliestTimeStamp)
+        earliestTimeStamp = cnt.timestamp;
     }
     
     if (i+1 != numDevices) {
@@ -117,12 +120,16 @@ int main(int argc, char* argv[]) {
     }
   }    
 
+  // Prefix printouts with node number
+  string prefix = "";
+  if (const char* node_id = getenv("SLURM_NODEID"))
+    prefix = string("Node ") + node_id + ", ";
+
+  double tot_energy = 0.0;
+  uint64_t latestTimeStamp = 0;
 
   // Loop over all visible GPU devices and print/save energy counter
   for (unsigned int i=0; i<numDevices; ++i) {
-    // uint64_t energy;
-    // float res;
-    // uint64_t timestamp;
     energy_counter_t cnt;
     ret = rsmi_dev_energy_count_get(i, &cnt.energy, &cnt.resolution,
                                     &cnt.timestamp);
@@ -139,6 +146,8 @@ int main(int argc, char* argv[]) {
     }
 
     uint64_t energy = cnt.energy;
+    if (latestTimeStamp == 0 || cnt.timestamp > latestTimeStamp)
+      latestTimeStamp = cnt.timestamp;
 
     // Check previous value if we're printing the difference
     if (diff) {
@@ -158,9 +167,26 @@ int main(int argc, char* argv[]) {
 
     if (diff || !save) {
       double energyWh = (double)energy*cnt.resolution/3600000000.0;
-      cout << "GPU " << i << ": " << energyWh << " Wh" << endl;
+      tot_energy += energyWh;
+      cout << prefix << "GPU " << i << ": " << energyWh << " Wh" << endl;
     }      
   }
+
+  if (diff || !save) {
+    cout << prefix << "TOTAL: " << tot_energy << " Wh" << endl;
+
+    if (latestTimeStamp == 0 || earliestTimeStamp == 0 ||
+        latestTimeStamp < earliestTimeStamp)
+    {
+      cerr << "WARNING: timestamps don't make sense: start=" << earliestTimeStamp
+           << ", stop=" << latestTimeStamp << endl;
+    } else {
+      double timediff = (latestTimeStamp - earliestTimeStamp)/1e9;  // ns -> seconds
+      cout << prefix << "Time: " << timediff << " s" << endl;
+      cout << prefix << "Average power: " << tot_energy/(timediff/60.0/60.0) << " W" << endl;
+    }
+
+  }  
 
   if (save)
     fp.close();

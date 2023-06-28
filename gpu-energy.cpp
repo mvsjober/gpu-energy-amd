@@ -9,6 +9,11 @@
 #include "rocm_smi/rocm_smi.h"
 
 #define EPSILON 0.0001f
+#define USE_MPI
+
+#ifdef USE_MPI
+#include <mpi.h>
+#endif // USE_MPI
 
 using namespace std;
 
@@ -54,7 +59,18 @@ int main(int argc, char* argv[]) {
     cerr << "       " << argv[0] << " --diff [filename]" << endl;
     return -1;
   }
-    
+
+
+  // Initialize MPI - this is used to communicate results in
+  // multi-node cases
+#ifdef USE_MPI
+  MPI_Init(nullptr, nullptr);
+
+  int world_rank;
+  int world_size;
+  MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+#endif // USE_MPI
 
   // Initialize RSMI library
   rsmi_status_t ret;
@@ -168,7 +184,8 @@ int main(int argc, char* argv[]) {
     if (diff || !save) {
       double energyWh = (double)energy*cnt.resolution/3600000000.0;
       tot_energy += energyWh;
-      cout << prefix << "GPU " << i << ": " << energyWh << " Wh" << endl;
+      if (energy != 0)  // second GCD is always 0, no need to print these
+        cout << prefix << "GPU " << i << ": " << energyWh << " Wh" << endl;
     }      
   }
 
@@ -182,10 +199,30 @@ int main(int argc, char* argv[]) {
            << ", stop=" << latestTimeStamp << endl;
     } else {
       double timediff = (latestTimeStamp - earliestTimeStamp)/1e9;  // ns -> seconds
-      cout << prefix << "Time: " << timediff << " s" << endl;
-      cout << prefix << "Average power: " << tot_energy/(timediff/60.0/60.0) << " W" << endl;
+      cout << prefix << "Average power: " << tot_energy/(timediff/60.0/60.0)
+           << " W (" << timediff << " s)" << endl;
     }
 
+#ifdef USE_MPI
+    double* recvbuf = nullptr;
+    if (world_rank == 0) {
+      recvbuf = new double[world_size];
+    }
+    MPI_Gather(&tot_energy, 1, MPI_DOUBLE,
+               recvbuf, 1, MPI_DOUBLE,
+               0, MPI_COMM_WORLD);
+
+    if (world_rank == 0) {
+      double gather = 0.0;
+      for (int i=0; i<world_size; ++i) {
+        gather += recvbuf[i];
+      }
+      delete[] recvbuf;
+      cout << "TOTAL (" << world_size << " tasks): "
+           << gather << " Wh" << endl;
+    }
+
+#endif // USE_MPI
   }  
 
   if (save)
@@ -195,5 +232,8 @@ int main(int argc, char* argv[]) {
     
   ret = rsmi_shut_down();
 
+#ifdef USE_MPI
+  MPI_Finalize();
+#endif // USE_MPI
   return 0;
 }

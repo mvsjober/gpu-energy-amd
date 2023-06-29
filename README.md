@@ -7,6 +7,8 @@ Reads the current GPU energy counters for AMD GPU cards using the
 
 To compile just run `make`.
 
+  * [ ] **NOTE:** on LUMI it is pre-installed in `/appl/local/csc/soft/ai/bin/gpu-energy`.
+
 ## Usage
 
 Print current counter values for all visible devices:

@@ -1,6 +1,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <sstream>
@@ -44,6 +45,8 @@ int main(int argc, char* argv[]) {
   bool save = false;   // if we should save the result to file
   bool diff = false;  // if we should print energy difference
 
+  cout << fixed;
+  cout << setprecision(2);
   
   // Handle command line arguments
   string mode = argc > 1 ? argv[1] : "";
@@ -59,7 +62,6 @@ int main(int argc, char* argv[]) {
     cerr << "       " << argv[0] << " --diff [filename]" << endl;
     return -1;
   }
-
 
   // Initialize MPI - this is used to communicate results in
   // multi-node cases
@@ -96,7 +98,6 @@ int main(int argc, char* argv[]) {
   
   
   // Read previous values if needed
-  uint64_t earliestTimeStamp = 0;
   if (diff) {
     ifstream fp(filename);
 
@@ -110,8 +111,6 @@ int main(int argc, char* argv[]) {
       energy_counter_t cnt;
       fp >> i >> cnt.energy >> cnt.resolution >> cnt.timestamp;
       previousValues[i] = cnt;
-      if (earliestTimeStamp == 0 || cnt.timestamp < earliestTimeStamp)
-        earliestTimeStamp = cnt.timestamp;
     }
     
     if (i+1 != numDevices) {
@@ -138,11 +137,12 @@ int main(int argc, char* argv[]) {
 
   // Prefix printouts with node number
   string prefix = "";
-  if (const char* node_id = getenv("SLURM_NODEID"))
-    prefix = string("Node ") + node_id + ", ";
+#ifdef USE_MPI
+  if (world_size > 1)
+    prefix = string("Rank ") + to_string(world_rank) + ", ";
+#endif // USE_MPI
 
   double tot_energy = 0.0;
-  uint64_t latestTimeStamp = 0;
 
   // Loop over all visible GPU devices and print/save energy counter
   for (unsigned int i=0; i<numDevices; ++i) {
@@ -162,12 +162,11 @@ int main(int argc, char* argv[]) {
     }
 
     uint64_t energy = cnt.energy;
-    if (latestTimeStamp == 0 || cnt.timestamp > latestTimeStamp)
-      latestTimeStamp = cnt.timestamp;
+    energy_counter_t prev;
 
     // Check previous value if we're printing the difference
     if (diff) {
-      auto prev = previousValues.at(i);
+      prev = previousValues.at(i);
       if (fabs(cnt.resolution - prev.resolution) > EPSILON) {
         cerr << "ERROR: counter resolutions are different: " << cnt.resolution
              << " != " << prev.resolution << endl;
@@ -184,44 +183,43 @@ int main(int argc, char* argv[]) {
     if (diff || !save) {
       double energyWh = (double)energy*cnt.resolution/3600000000.0;
       tot_energy += energyWh;
-      if (energy != 0)  // second GCD is always 0, no need to print these
-        cout << prefix << "GPU " << i << ": " << energyWh << " Wh" << endl;
-    }      
+      if (energy != 0) {  // second GCD is always 0, no need to print these
+        cout << prefix << "GPU " << i << ": " << energyWh << " Wh";
+        if (diff && cnt.timestamp != 0 && prev.timestamp != 0 &&
+            cnt.timestamp > prev.timestamp) {
+          // Time difference in seconds (timestamps are in nanoseconds)
+          double timediff = (cnt.timestamp - prev.timestamp)/1e9;
+          cout << ", avg power: " << energyWh/timediff*60.0*60.0
+               << " W (" << timediff << " s)";
+        }
+        cout << endl;
+      }
+    }
   }
 
   if (diff || !save) {
     cout << prefix << "TOTAL: " << tot_energy << " Wh" << endl;
 
-    if (latestTimeStamp == 0 || earliestTimeStamp == 0 ||
-        latestTimeStamp < earliestTimeStamp)
-    {
-      cerr << "WARNING: timestamps don't make sense: start=" << earliestTimeStamp
-           << ", stop=" << latestTimeStamp << endl;
-    } else {
-      double timediff = (latestTimeStamp - earliestTimeStamp)/1e9;  // ns -> seconds
-      cout << prefix << "Average power: " << tot_energy/(timediff/60.0/60.0)
-           << " W (" << timediff << " s)" << endl;
-    }
-
 #ifdef USE_MPI
-    double* recvbuf = nullptr;
-    if (world_rank == 0) {
-      recvbuf = new double[world_size];
-    }
-    MPI_Gather(&tot_energy, 1, MPI_DOUBLE,
-               recvbuf, 1, MPI_DOUBLE,
-               0, MPI_COMM_WORLD);
-
-    if (world_rank == 0) {
-      double gather = 0.0;
-      for (int i=0; i<world_size; ++i) {
-        gather += recvbuf[i];
+    if (world_size > 1) {
+      double* recvbuf = nullptr;
+      if (world_rank == 0) {
+        recvbuf = new double[world_size];
       }
-      delete[] recvbuf;
-      cout << "TOTAL (" << world_size << " tasks): "
-           << gather << " Wh" << endl;
-    }
+      MPI_Gather(&tot_energy, 1, MPI_DOUBLE,
+                 recvbuf, 1, MPI_DOUBLE,
+                 0, MPI_COMM_WORLD);
 
+      if (world_rank == 0) {
+        double gather = 0.0;
+        for (int i=0; i<world_size; ++i) {
+          gather += recvbuf[i];
+        }
+        delete[] recvbuf;
+        cout << "TOTAL (" << world_size << " tasks)" << ": " << gather << " Wh"
+             << endl;
+      }
+    }
 #endif // USE_MPI
   }  
 

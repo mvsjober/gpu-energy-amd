@@ -1,6 +1,7 @@
 # GPU energy usage counter for AMD/ROCm
 
-Reads the current GPU energy counters for AMD GPU cards using the [ROCm SMI library](https://github.com/RadeonOpenCompute/rocm_smi_lib/). 
+Reads the current GPU energy counters for AMD GPU cards using the 
+[ROCm SMI library](https://github.com/RadeonOpenCompute/rocm_smi_lib/). 
 
 ## Installation
 
@@ -20,7 +21,8 @@ Save counters to a temporary file for later use:
 gpu-energy --save [filename]
 ```
 
-if no filename is given, it will try to figure out a good name based on the Slurm environment.
+if no filename is given, it will try to figure out a good name based
+on the Slurm environment.
 
 Print energy usage difference since last save:
 
@@ -47,4 +49,17 @@ srun --ntasks=$SLURM_NNODES --ntasks-per-node=1 gpu-energy --save
 # run job here
 
 srun --ntasks=$SLURM_NNODES --ntasks-per-node=1 gpu-energy --diff
+```
+
+If you're using a module (like CSC's `pytorch`) that sets the
+`SLURM_MPI_TYPE` environment variable, you need to run it like this
+(otherwise it will not detect MPI and will not calculate the energy
+sum over nodes).
+
+```bash
+srun --mpi=cray_shasta --ntasks=$SLURM_NNODES --ntasks-per-node=1 gpu-energy --save
+
+# run job here
+
+srun --mpi=cray_shasta --ntasks=$SLURM_NNODES --ntasks-per-node=1 gpu-energy --diff
 ```
